@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/gnehs/subtitle-translator#readme",
   "dependencies": {
+    "ass-compiler": "^0.1.7",
     "colors": "^1.4.0",
     "openai": "^3.2.1",
     "subtitle": "^4.2.1"

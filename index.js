@@ -4,6 +4,18 @@ import {Configuration, OpenAIApi} from 'openai'
 import {parseSync, stringifySync} from 'subtitle'
 import {compile, decompile} from "ass-compiler";
 
+function retryPromise(promiseFn, maxRetries, retryDelayMs) {
+  return promiseFn().catch(error => {
+    if (maxRetries <= 0) {
+      throw error;
+    }
+    console.log(`Retrying after ${retryDelayMs} ms. ${maxRetries} retries remaining.`);
+    return new Promise(resolve => setTimeout(resolve, retryDelayMs)).then(() => {
+      return retryPromise(promiseFn, maxRetries - 1, retryDelayMs);
+    });
+  });
+}
+
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'))
 
 const configuration = new Configuration({
@@ -14,21 +26,31 @@ const openai = new OpenAIApi(configuration);
 let subtitles = fs.readdirSync('./src')
 let supportExtensions = ['srt', 'vtt', 'ass']
 
-async function translate(previousSubtitles, input) {
-  const completion = await openai.createChatCompletion({
-    model: "gpt-3.5-turbo",
-    messages: [
-      {
-        role: "system",
-        content: `You are a program responsible for translating subtitles. Your task is to output the specified target language based on the input text. Please do not create the following subtitles on your own. Please do not output any text other than the translation. You will receive the subtitles in JSON format, the Input property needs needs to be translated, the previous translation results and next subtitle should be user only as context. Your reply should have the same JSON schema as the JSON you received. If you need to merge the subtitles with the following line, simply repeat the translation. Please transliterate the person's name into the local language. Target language: ${config.TARGET_LANGUAGE}`
-      },
-      ...previousSubtitles.slice(-4),
-      {
-        role: "user",
-        content: JSON.stringify(input)
-      }
-    ],
+async function openaiApiCall(previousSubtitles, input) {
+  return retryPromise(() => {
+    return openai.createChatCompletion({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: `You are a program responsible for translating subtitles. Your task is to output the specified target language based on the input text. Please do not create the following subtitles on your own. Please do not output any text other than the translation. You will receive the subtitles in JSON format, the Input property needs needs to be translated, the previous translation results and next subtitle should be user only as context. Your reply should have the same JSON schema as the JSON you received. If you need to merge the subtitles with the following line, simply repeat the translation. Please transliterate the person's name into the local language. Target language: ${config.TARGET_LANGUAGE}`
+        },
+        ...previousSubtitles.slice(-4),
+        {
+          role: "user",
+          content: JSON.stringify(input)
+        }
+      ],
+    });
+  }, 3, 1000).then(result => {
+    return result;
+  }).catch(error => {
+    console.error(error);
   });
+}
+
+async function translate(previousSubtitles, input) {
+  const completion = await openaiApiCall(previousSubtitles, input);
   let result = completion.data.choices[0].message.content
   try {
     let parsed = JSON.parse(result)
@@ -37,12 +59,12 @@ async function translate(previousSubtitles, input) {
       result = parsed.Output
     }
     if (result === undefined) {
-      throw "Result format invalid"
+      throw new Error("Result format invalid")
     }
   } catch (e) {
-    let match_result = result.match(/"Input":"(.*?)",/)
+    let match_result = result?.match(/"Input":"(.*?)",/)
     if (match_result === null) {
-      match_result = result.match(/"Output":"(.*?)",/)
+      match_result = result?.match(/"Output":"(.*?)",/)
     }
     if (match_result === null) {
       console.log('###'.red)
@@ -75,7 +97,7 @@ async function convertStr(subtitle) {
   }
 }
 
-async function convertAss(subtitle) {
+async function convertAss(subtitle, filename) {
   let previousSubtitles = []
 
   for (let i = 0; i < subtitle.dialogues.length; i++) {
@@ -89,6 +111,7 @@ async function convertAss(subtitle) {
     previousSubtitles.push({role: 'assistant', content: JSON.stringify({...input, Input: result})})
 
     subtitle.dialogues[i].slices[0].fragments[0].text = `${result}`
+    fs.writeFileSync(`./res/${filename}.tmp`, decompile(subtitle))
     console.log(`-----------------`.gray)
     console.log(`${i + 1} / ${subtitle.dialogues.length}`.gray)
     console.log(`${result}`.green)
@@ -103,7 +126,7 @@ for (let subtitleFile of subtitles) {
   let subtitle = fs.readFileSync(`./src/${subtitleFile}`, 'utf8')
   if (isAss) {
     subtitle = compile(subtitle)
-    await convertAss(subtitle);
+    await convertAss(subtitle, subtitleFile);
     fs.writeFileSync(`./res/${subtitleFile}`, decompile(subtitle))
   } else {
     subtitle = parseSync(subtitle)

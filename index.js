@@ -1,4 +1,6 @@
 import fs from 'fs'
+import path from 'path';
+import {fileURLToPath} from 'url';
 import colors from 'colors'
 import {Configuration, OpenAIApi} from 'openai'
 import {parseSync, stringifySync} from 'subtitle'
@@ -16,15 +18,15 @@ function retryPromise(promiseFn, maxRetries, retryDelayMs) {
   });
 }
 
-const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'))
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8'))
 
 const configuration = new Configuration({
   apiKey: config.OPENAI_API_KEY,
 });
 const openai = new OpenAIApi(configuration);
 
-let subtitles = fs.readdirSync('./src')
-let supportExtensions = ['srt', 'vtt', 'ass']
+let supportExtensions = ['.srt', '.vtt', '.ass']
 
 async function openaiApiCall(previousSubtitles, input) {
   return retryPromise(() => {
@@ -71,6 +73,8 @@ async function translate(previousSubtitles, input) {
       console.log(e.toString().red)
       console.log(result?.red)
       console.log('###'.red)
+    } else {
+      result = match_result;
     }
   }
   return result;
@@ -97,7 +101,7 @@ async function convertStr(subtitle) {
   }
 }
 
-async function convertAss(subtitle, filename) {
+async function convertAss(subtitle) {
   let previousSubtitles = []
 
   for (let i = 0; i < subtitle.dialogues.length; i++) {
@@ -111,7 +115,7 @@ async function convertAss(subtitle, filename) {
     previousSubtitles.push({role: 'assistant', content: JSON.stringify({...input, Input: result})})
 
     subtitle.dialogues[i].slices[0].fragments[0].text = `${result}`
-    fs.writeFileSync(`./res/${filename}.tmp`, decompile(subtitle))
+    fs.writeFileSync(`${newFilePath}.tmp`, decompile(subtitle))
     console.log(`-----------------`.gray)
     console.log(`${i + 1} / ${subtitle.dialogues.length}`.gray)
     console.log(`${result}`.green)
@@ -119,20 +123,27 @@ async function convertAss(subtitle, filename) {
   }
 }
 
-for (let subtitleFile of subtitles) {
-  const ext = subtitleFile.split('.').pop();
-  if (!supportExtensions.includes(ext)) continue
-  const isAss = (ext === 'ass');
-  let subtitle = fs.readFileSync(`./src/${subtitleFile}`, 'utf8')
-  if (isAss) {
-    subtitle = compile(subtitle)
-    await convertAss(subtitle, subtitleFile);
-    fs.writeFileSync(`./res/${subtitleFile}`, decompile(subtitle))
-  } else {
-    subtitle = parseSync(subtitle)
-    subtitle = subtitle.filter(line => line.type === 'cue')
-    await convertStr(subtitle);
-    fs.writeFileSync(`./res/${subtitleFile}`, stringifySync(subtitle, {format: 'srt'}))
-  }
+// Get the file path from the command line argument
+const filePath = process.argv[2];
+const fileName = path.basename(filePath);
+const fileExtension = path.extname(filePath);
+const newFilePath = `${fileName.replace(fileExtension, '')}.${config.TARGET_LANGUAGE.toLowerCase()}${fileExtension}`;
 
+if (!supportExtensions.includes(fileExtension)) {
+  console.error('file extension not supported');
+  process.exit(1); // Exit with error code 1
 }
+const isAss = (fileExtension === '.ass');
+let subtitle = fs.readFileSync(filePath, 'utf8')
+if (isAss) {
+  subtitle = compile(subtitle)
+  await convertAss(subtitle);
+  fs.writeFileSync(newFilePath, decompile(subtitle))
+  fs.rmSync(`${newFilePath}.tmp`, {force: true});
+} else {
+  subtitle = parseSync(subtitle)
+  subtitle = subtitle.filter(line => line.type === 'cue')
+  await convertStr(subtitle);
+  fs.writeFileSync(newFilePath, stringifySync(subtitle, {format: 'srt'}))
+}
+console.log(`Translated subtitle saved to ${newFilePath}.`)
